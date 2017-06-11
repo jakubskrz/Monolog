@@ -10,25 +10,12 @@
 
 namespace Kdyby\Monolog;
 
-use Kdyby;
-use Monolog;
-use Nette;
-
-
-
-/**
- * @author Filip Procházka <filip@prochazka.su>
- */
-class Logger extends Monolog\Logger
+interface Exception
 {
 
-	/**
-	 * @param string $channel
-	 * @return CustomChannel
-	 */
-	public function channel($channel)
-	{
-		return new CustomChannel($channel, $this);
-	}
+}
+
+class NotSupportedException extends \LogicException implements \Kdyby\Monolog\Exception
+{
 
 }

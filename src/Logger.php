@@ -8,21 +8,20 @@
  * For the full copyright and license information, please view the file license.txt that was distributed with this source code.
  */
 
-namespace Kdyby\Monolog\Diagnostics;
+namespace Kdyby\Monolog;
 
-use Tracy\Logger;
-
-
-
-class TracyLogger extends Logger
+class Logger extends \Monolog\Logger
 {
 
+	use \Kdyby\StrictObjects\Scream;
+
 	/**
-	 * @return string
+	 * @param string $channel
+	 * @return \Kdyby\Monolog\CustomChannel
 	 */
-	public function logException($exception, $file = NULL)
+	public function channel($channel)
 	{
-		return parent::logException($exception, $file);
+		return new CustomChannel($channel, $this);
 	}
 
 }

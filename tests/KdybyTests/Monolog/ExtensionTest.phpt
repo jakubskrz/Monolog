@@ -3,31 +3,29 @@
 /**
  * Test: Kdyby\Monolog\Extension.
  *
- * @testCase KdybyTests\Monolog\ExtensionTest
- * @author Filip Procházka <filip@prochazka.su>
- * @package Kdyby\Monolog
+ * @testCase
  */
 
 namespace KdybyTests\Monolog;
 
-use Kdyby;
-use KdybyTests;
-use Monolog;
-use Nette;
-use Tester;
+use Kdyby\Monolog\DI\MonologExtension;
+use Kdyby\Monolog\Processor\PriorityProcessor;
+use Kdyby\Monolog\Processor\TracyExceptionProcessor;
+use Kdyby\Monolog\Processor\TracyUrlProcessor;
+use Monolog\Handler\BrowserConsoleHandler;
+use Monolog\Handler\ChromePHPHandler;
+use Monolog\Handler\NewRelicHandler;
+use Monolog\Logger as MonologLogger;
+use Monolog\Processor\GitProcessor;
+use Monolog\Processor\ProcessIdProcessor;
+use Monolog\Processor\WebProcessor;
+use Nette\Configurator;
 use Tester\Assert;
 use Tracy\Debugger;
 
-
-
 require_once __DIR__ . '/../bootstrap.php';
 
-
-
-/**
- * @author Filip Procházka <filip@prochazka.su>
- */
-class ExtensionTest extends Tester\TestCase
+class ExtensionTest extends \Tester\TestCase
 {
 
 	/**
@@ -35,9 +33,9 @@ class ExtensionTest extends Tester\TestCase
 	 */
 	protected function createContainer($configName = NULL)
 	{
-		$config = new Nette\Configurator();
+		$config = new Configurator();
 		$config->setTempDirectory(TEMP_DIR);
-		Kdyby\Monolog\DI\MonologExtension::register($config);
+		MonologExtension::register($config);
 		$config->addConfig(__DIR__ . '/../nette-reset.neon');
 
 		if ($configName !== NULL) {
@@ -47,15 +45,11 @@ class ExtensionTest extends Tester\TestCase
 		return $config->createContainer();
 	}
 
-
-
 	public function testServices()
 	{
 		$dic = $this->createContainer();
-		Assert::true($dic->getService('monolog.logger') instanceof Monolog\Logger);
+		Assert::true($dic->getService('monolog.logger') instanceof MonologLogger);
 	}
-
-
 
 	public function testFunctional()
 	{
@@ -66,8 +60,8 @@ class ExtensionTest extends Tester\TestCase
 		Debugger::$logDirectory = TEMP_DIR;
 
 		$dic = $this->createContainer();
-		/** @var Monolog\Logger $logger */
-		$logger = $dic->getByType('Monolog\Logger');
+		/** @var \Monolog\Logger $logger */
+		$logger = $dic->getByType(MonologLogger::class);
 
 		Debugger::log('tracy message 1');
 		Debugger::log('tracy message 2', 'error');
@@ -85,19 +79,19 @@ class ExtensionTest extends Tester\TestCase
 
 		Assert::match(
 			'[%a%] tracy message 1 {"at":"%a%"} []' . "\n" .
-			'[%a%] Exception: tracy exception message 2 in %a%:%d% {"at":"%a%","tracy":"exception-%a%.html"} []' . "\n" .
+			'[%a%] Exception: tracy exception message 2 in %a%:%d% {"at":"%a%","exception":"%a%","tracy_filename":"exception-%a%.html","tracy_created":true} []' . "\n" .
 			'[%a%] logger message 1 [] []',
 			file_get_contents(TEMP_DIR . '/info.log')
 		);
 
 		Assert::match(
-			'[%a%] exception message 1 {"exception":"%a%","tracy":"exception-%a%.html"} []',
+			'[%a%] exception message 1 {"exception":"%a%","tracy_filename":"exception-%a%.html","tracy_created":true} []',
 			file_get_contents(TEMP_DIR . '/warning.log')
 		);
 
 		Assert::match(
 			'[%a%] tracy message 2 {"at":"%a%"} []' . "\n" .
-			'[%a%] Exception: tracy exception message 1 in %a%:%d% {"at":"%a%","tracy":"exception-%a%.html"} []' . "\n" .
+			'[%a%] Exception: tracy exception message 1 in %a%:%d% {"at":"%a%","exception":"%a%","tracy_filename":"exception-%a%.html","tracy_created":true} []' . "\n" .
 			'[%a%] logger message 3 [] []',
 			file_get_contents(TEMP_DIR . '/error.log')
 		);
@@ -111,35 +105,31 @@ class ExtensionTest extends Tester\TestCase
 		Assert::count(3, glob(TEMP_DIR . '/exception-*.html'));
 	}
 
-
-
 	public function testHandlersSorting()
 	{
 		$dic = $this->createContainer('handlers');
-		$logger = $dic->getByType('Monolog\Logger');
+		$logger = $dic->getByType(MonologLogger::class);
 		$handlers = $logger->getHandlers();
 		Assert::count(3, $handlers);
-		Assert::type('Monolog\Handler\NewRelicHandler', array_shift($handlers));
-		Assert::type('Monolog\Handler\ChromePHPHandler', array_shift($handlers));
-		Assert::type('Monolog\Handler\BrowserConsoleHandler', array_shift($handlers));
+		Assert::type(NewRelicHandler::class, array_shift($handlers));
+		Assert::type(ChromePHPHandler::class, array_shift($handlers));
+		Assert::type(BrowserConsoleHandler::class, array_shift($handlers));
 	}
-
-
 
 	public function testProcessorsSorting()
 	{
 		$dic = $this->createContainer('processors');
-		$logger = $dic->getByType('Monolog\Logger');
+		$logger = $dic->getByType(MonologLogger::class);
 		$processors = $logger->getProcessors();
 		Assert::count(6, $processors);
-		Assert::type('Kdyby\Monolog\Processor\TracyExceptionProcessor', array_shift($processors));
-		Assert::type('Kdyby\Monolog\Processor\PriorityProcessor', array_shift($processors));
-		Assert::type('Kdyby\Monolog\Processor\TracyUrlProcessor', array_shift($processors));
-		Assert::type('Monolog\Processor\WebProcessor', array_shift($processors));
-		Assert::type('Monolog\Processor\ProcessIdProcessor', array_shift($processors));
-		Assert::type('Monolog\Processor\GitProcessor', array_shift($processors));
+		Assert::type(TracyExceptionProcessor::class, array_shift($processors));
+		Assert::type(PriorityProcessor::class, array_shift($processors));
+		Assert::type(TracyUrlProcessor::class, array_shift($processors));
+		Assert::type(WebProcessor::class, array_shift($processors));
+		Assert::type(ProcessIdProcessor::class, array_shift($processors));
+		Assert::type(GitProcessor::class, array_shift($processors));
 	}
 
 }
 
-run(new ExtensionTest());
+(new ExtensionTest())->run();

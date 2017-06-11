@@ -10,29 +10,37 @@
 
 namespace Kdyby\Monolog\DI;
 
-use Nette;
+use Kdyby\Monolog\Handler\FallbackNetteHandler;
+use Kdyby\Monolog\Logger as KdybyLogger;
+use Kdyby\Monolog\Processor\PriorityProcessor;
+use Kdyby\Monolog\Processor\TracyExceptionProcessor;
+use Kdyby\Monolog\Processor\TracyUrlProcessor;
+use Kdyby\Monolog\Tracy\BlueScreenRenderer;
+use Kdyby\Monolog\Tracy\MonologAdapter;
 use Nette\Configurator;
 use Nette\DI\Compiler;
-use Nette\DI\CompilerExtension;
+use Nette\DI\Helpers as DIHelpers;
 use Nette\DI\Statement;
-use Nette\PhpGenerator as Code;
+use Nette\PhpGenerator\ClassType as ClassTypeGenerator;
+use Nette\PhpGenerator\PhpLiteral;
+use Psr\Log\LoggerAwareInterface;
 use Tracy\Debugger;
-
-
 
 /**
  * Integrates the Monolog seamlessly into your Nette Framework application.
- *
- * @author Martin Bažík <martin@bazo.sk>
- * @author Filip Procházka <filip@prochazka.su>
  */
-class MonologExtension extends CompilerExtension
+class MonologExtension extends \Nette\DI\CompilerExtension
 {
+
+	use \Kdyby\StrictObjects\Scream;
 
 	const TAG_HANDLER = 'monolog.handler';
 	const TAG_PROCESSOR = 'monolog.processor';
 	const TAG_PRIORITY = 'monolog.priority';
 
+	/**
+	 * @var mixed[]
+	 */
 	private $defaults = [
 		'handlers' => [],
 		'processors' => [],
@@ -43,66 +51,60 @@ class MonologExtension extends CompilerExtension
 		// 'registerFallback' => TRUE,
 	];
 
-
-
 	public function loadConfiguration()
 	{
 		$builder = $this->getContainerBuilder();
+
 		$config = $this->getConfig($this->defaults);
+		$config['logDir'] = self::resolveLogDir($builder->parameters);
+		self::createDirectory($config['logDir']);
+		$this->setConfig($config);
 
 		if (!isset($builder->parameters[$this->name]) || (is_array($builder->parameters[$this->name]) && !isset($builder->parameters[$this->name]['name']))) {
 			$builder->parameters[$this->name]['name'] = $config['name'];
 		}
 
-		$builder->addDefinition($this->prefix('logger'))
-			->setClass('Kdyby\Monolog\Logger', [$config['name']]);
-
-		if (!isset($builder->parameters['logDir'])) {
-			if (Debugger::$logDirectory) {
-				$builder->parameters['logDir'] = Debugger::$logDirectory;
-
-			} else {
-				$builder->parameters['logDir'] = $builder->expand('%appDir%/../log');
-			}
+		if (!isset($builder->parameters['logDir'])) { // BC
+			$builder->parameters['logDir'] = $config['logDir'];
 		}
 
-		if (!is_dir($builder->parameters['logDir'])) {
-			@mkdir($builder->parameters['logDir']);
+		$builder->addDefinition($this->prefix('logger'))
+			->setClass(KdybyLogger::class, [$config['name']]);
+
+		// Tracy adapter
+		$builder->addDefinition($this->prefix('adapter'))
+			->setClass(MonologAdapter::class, [
+				'monolog' => $this->prefix('@logger'),
+				'blueScreenRenderer' => $this->prefix('@blueScreenRenderer'),
+				'email' => Debugger::$email,
+			])
+			->addTag('logger');
+
+		// The renderer has to be separate, to solve circural service dependencies
+		$builder->addDefinition($this->prefix('blueScreenRenderer'))
+			->setClass(BlueScreenRenderer::class, [
+				'directory' => $config['logDir'],
+			])
+			->setAutowired(FALSE)
+			->addTag('logger');
+
+		if ($config['hookToTracy'] === TRUE && $builder->hasDefinition('tracy.logger')) {
+			// TracyExtension initializes the logger from DIC, if definition is changed
+			$builder->removeDefinition($existing = 'tracy.logger');
+			$builder->addAlias($existing, $this->prefix('adapter'));
 		}
 
 		$this->loadHandlers($config);
 		$this->loadProcessors($config);
-
-		// Tracy adapter
-		$builder->addDefinition($this->prefix('adapter'))
-			->setClass('Kdyby\Monolog\Diagnostics\MonologAdapter', [$this->prefix('@logger')])
-			->addTag('logger');
-
-		if ($builder->hasDefinition('tracy.logger')) { // since Nette 2.3
-			$builder->removeDefinition($existing = 'tracy.logger');
-
-			if (method_exists($builder, 'addAlias')) { // since Nette 2.3
-				$builder->addAlias($existing, $this->prefix('adapter'));
-
-			} else { // old way of providing BC
-				$builder->addDefinition($existing)
-					->setFactory($this->prefix('@adapter'));
-			}
-		}
 	}
 
-
-
-	/**
-	 * @param $config
-	 */
 	protected function loadHandlers(array $config)
 	{
 		$builder = $this->getContainerBuilder();
 
 		foreach ($config['handlers'] as $handlerName => $implementation) {
-			$this->compiler->parseServices($builder, [
-				'services' => [$serviceName = $this->prefix('handler.' . $handlerName) => $implementation],
+			Compiler::loadDefinitions($builder, [
+				$serviceName = $this->prefix('handler.' . $handlerName) => $implementation,
 			]);
 
 			$builder->getDefinition($serviceName)
@@ -111,11 +113,6 @@ class MonologExtension extends CompilerExtension
 		}
 	}
 
-
-
-	/**
-	 * @param $config
-	 */
 	protected function loadProcessors(array $config)
 	{
 		$builder = $this->getContainerBuilder();
@@ -123,26 +120,31 @@ class MonologExtension extends CompilerExtension
 		if ($config['usePriorityProcessor'] === TRUE) {
 			// change channel name to priority if available
 			$builder->addDefinition($this->prefix('processor.priorityProcessor'))
-				->setClass('Kdyby\Monolog\Processor\PriorityProcessor')
+				->setClass(PriorityProcessor::class)
 				->addTag(self::TAG_PROCESSOR)
 				->addTag(self::TAG_PRIORITY, 20);
 		}
 
 		$builder->addDefinition($this->prefix('processor.tracyException'))
-			->setClass('Kdyby\Monolog\Processor\TracyExceptionProcessor', [$builder->expand('%logDir%')])
+			->setClass(TracyExceptionProcessor::class, [
+				'blueScreenRenderer' => $this->prefix('@blueScreenRenderer'),
+			])
 			->addTag(self::TAG_PROCESSOR)
 			->addTag(self::TAG_PRIORITY, 100);
 
 		if ($config['tracyBaseUrl'] !== NULL) {
 			$builder->addDefinition($this->prefix('processor.tracyBaseUrl'))
-				->setClass('Kdyby\Monolog\Processor\TracyUrlProcessor', [$config['tracyBaseUrl']])
+				->setClass(TracyUrlProcessor::class, [
+					'baseUrl' => $config['tracyBaseUrl'],
+					'blueScreenRenderer' => $this->prefix('@blueScreenRenderer'),
+				])
 				->addTag(self::TAG_PROCESSOR)
 				->addTag(self::TAG_PRIORITY, 10);
 		}
 
 		foreach ($config['processors'] as $processorName => $implementation) {
-			$this->compiler->parseServices($builder, [
-				'services' => [$serviceName = $this->prefix('processor.' . $processorName) => $implementation],
+			Compiler::loadDefinitions($builder, [
+				$serviceName = $this->prefix('processor.' . $processorName) => $implementation,
 			]);
 
 			$builder->getDefinition($serviceName)
@@ -150,8 +152,6 @@ class MonologExtension extends CompilerExtension
 				->addTag(self::TAG_PRIORITY, is_numeric($processorName) ? $processorName : 0);
 		}
 	}
-
-
 
 	public function beforeCompile()
 	{
@@ -170,12 +170,17 @@ class MonologExtension extends CompilerExtension
 
 		if ($config['registerFallback']) {
 			$logger->addSetup('pushHandler', [
-				new Statement('Kdyby\Monolog\Handler\FallbackNetteHandler', [$config['name'], $builder->expand('%logDir%')])
+				new Statement(FallbackNetteHandler::class, [
+					'appName' => $config['name'],
+					'logDir' => $config['logDir'],
+				]),
 			]);
 		}
+
+		foreach ($builder->findByType(LoggerAwareInterface::class) as $service) {
+			$service->addSetup('setLogger', ['@' . $this->prefix('logger')]);
+		}
 	}
-
-
 
 	protected function findByTagSorted($tag)
 	{
@@ -191,41 +196,46 @@ class MonologExtension extends CompilerExtension
 		return $services;
 	}
 
-
-
-	public function afterCompile(Code\ClassType $class)
+	public function afterCompile(ClassTypeGenerator $class)
 	{
-		$builder = $this->getContainerBuilder();
-		$config = $this->getConfig($this->defaults);
-
 		$initialize = $class->getMethod('initialize');
 
-		if ($config['hookToTracy'] === TRUE) {
-			if (method_exists('Tracy\Debugger', 'setLogger')) {
-				$code = '\Tracy\Debugger::setLogger($this->getService(?));';
-
-			} elseif (method_exists('Nette\Diagnostics\Debugger', 'setLogger')) {
-				$code = '\Nette\Diagnostics\Debugger::setLogger($this->getService(?));';
-
-			} else {
-				$code = '\Nette\Diagnostics\Debugger::$logger = $this->getService(?);';
-			}
-
-			$initialize->addBody($code, [$this->prefix('adapter')]);
-		}
-
 		if (empty(Debugger::$logDirectory)) {
-			$initialize->addBody('Tracy\Debugger::$logDirectory = ?;', [$builder->expand('%logDir%')]);
+			$initialize->addBody('?::$logDirectory = ?;', [new PhpLiteral(Debugger::class), $this->config['logDir']]);
 		}
 	}
-
-
 
 	public static function register(Configurator $configurator)
 	{
 		$configurator->onCompile[] = function ($config, Compiler $compiler) {
 			$compiler->addExtension('monolog', new MonologExtension());
 		};
+	}
+
+	/**
+	 * @return string
+	 */
+	private static function resolveLogDir(array $parameters)
+	{
+		if (isset($parameters['logDir'])) {
+			return DIHelpers::expand('%logDir%', $parameters);
+		}
+
+		if (Debugger::$logDirectory !== NULL) {
+			return Debugger::$logDirectory;
+		}
+
+		return DIHelpers::expand('%appDir%/../log', $parameters);
+	}
+
+	/**
+	 * @param string $logDir
+	 */
+	private static function createDirectory($logDir)
+	{
+		if (!@mkdir($logDir, 0777, TRUE) && !is_dir($logDir)) {
+			throw new \RuntimeException(sprintf('Log dir %s cannot be created', $logDir));
+		}
 	}
 
 }
